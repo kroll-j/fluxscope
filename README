@@ -5,3 +5,6 @@ Features:
  - Responsive OpenGL-based display, line mode
  - Updated continuously or triggered on rising/falling edge
  - Quick & easy-to-use GUI
+
+code: https://github.com/jkroll20/fluxscope
+screenshot: https://github.com/jkroll20/fluxscope/raw/master/screenshot.png
