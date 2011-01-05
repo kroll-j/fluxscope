@@ -1,0 +1,65 @@
+# depslib dependency file v1.0
+1294249814 source:/home/johannes/code/fluxscope/src/main.cpp
+	<sys/time.h>
+	<unistd.h>
+	<cstdlib>
+	<cstdio>
+	<vector>
+	<string>
+	<GL/gl.h>
+	<GL/glu.h>
+	<SDL/SDL.h>
+	<SDL/SDL_thread.h>
+	<jack/jack.h>
+	<flux.h>
+
+1292508861 /home/johannes/code/fluxscope/libflux/src/flux.h
+	"defs.h"
+	"sys.h"
+	"prop_list.h"
+
+1291767561 /home/johannes/code/fluxscope/libflux/src/defs.h
+
+1291767561 /home/johannes/code/fluxscope/libflux/src/sys.h
+
+1291767561 /home/johannes/code/fluxscope/libflux/src/prop_list.h
+	"defs.h"
+	<cstring>
+	<cstdlib>
+	<cstdio>
+	<string.h>
+	<stdlib.h>
+	<stdio.h>
+
+1294252643 source:/home/johannes/code/fluxosc/src/main.cpp
+	<sys/time.h>
+	<unistd.h>
+	<cstdlib>
+	<cstdio>
+	<vector>
+	<string>
+	<GL/gl.h>
+	<GL/glu.h>
+	<SDL/SDL.h>
+	<SDL/SDL_thread.h>
+	<jack/jack.h>
+	<flux.h>
+
+1292508861 /home/johannes/code/fluxosc/libflux/src/flux.h
+	"defs.h"
+	"sys.h"
+	"prop_list.h"
+
+1291767561 /home/johannes/code/fluxosc/libflux/src/defs.h
+
+1291767561 /home/johannes/code/fluxosc/libflux/src/sys.h
+
+1291767561 /home/johannes/code/fluxosc/libflux/src/prop_list.h
+	"defs.h"
+	<cstring>
+	<cstdlib>
+	<cstdio>
+	<string.h>
+	<stdlib.h>
+	<stdio.h>
+
