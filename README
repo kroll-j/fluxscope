@@ -1,0 +1,7 @@
+FluxScope is an oscilloscope app with OpenGL-based display and GUI.
+
+Features:
+ - JACK input
+ - Responsive OpenGL-based display, line mode
+ - Updated continuously or triggered on rising/falling edge
+ - Quick & easy-to-use GUI

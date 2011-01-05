@@ -1,0 +1,3 @@
+[submodule "libflux"]
+	path = libflux
+	url = git://github.com/jkroll20/libflux.git
