@@ -1,9 +1,14 @@
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
 #include <cstdlib>
 #include <cstdio>
 #include <vector>
 #include <string>
+#include <sstream>
+#include <iostream>
+#include <fstream>
 #include <GL/gl.h>
 #include <GL/glu.h>
 #include <SDL/SDL.h>
@@ -270,15 +275,148 @@ class fluxWindowBase
 		virtual void cbMouse(primitive *self, int type, int x, int y, int btn) { }
 };
 
-class fluxOscWindow: public fluxWindowBase
+class configOptionSerializer
+{
+	private:
+		enum optionType
+		{
+			OT_FLOAT= 0,
+			OT_BOOL
+		};
+		struct configOption
+		{
+			optionType type;
+			std::string name;
+			void *address;
+
+			std::string getString()
+			{
+				std::ostringstream s;
+				switch(type)
+				{
+					case OT_FLOAT:
+						s << *(float*)address;
+						return s.str();
+					case OT_BOOL:
+						s << *(bool*)address;
+						return s.str();
+					default:
+						return std::string("unknown option type!");
+				}
+			}
+
+			void putString(const std::string &str)
+			{
+				std::istringstream s(str);
+				switch(type)
+				{
+					case OT_FLOAT:
+						s >> *(float*)address;
+						printf("%s -> %f\n", name.c_str(), *(float*)address);
+						break;
+					case OT_BOOL:
+						s >> *(bool*)address;
+						printf("%s -> %s\n", name.c_str(), *(bool*)address? "true": "false");
+						break;
+					default:
+						puts("unknown option type!");
+				}
+			}
+		};
+		vector<configOption> configOptions;
+		std::string name;
+
+		void addConfigOption(const char *name, optionType type, void *address)
+		{ configOptions.push_back( (configOption) { type, std::string(name), address } ); }
+
+	protected:
+		configOptionSerializer(const char *_name):
+			name(_name)
+		{ }
+
+		void addConfigOption(const char *name, float *address)
+		{ addConfigOption(name, OT_FLOAT, address); }
+
+		void addConfigOption(const char *name, bool *address)
+		{ addConfigOption(name, OT_BOOL, address); }
+
+		#define ADD_CONFIG_OPTION(var) addConfigOption(#var, &var)
+
+	public:
+		std::string serializeToString()
+		{
+			std::string ret;
+			for(vector<configOption>::iterator i= configOptions.begin(); i!=configOptions.end(); i++)
+				ret.append(name + "." + i->name + "=" + i->getString() + "\n");
+			return ret;
+		}
+
+		bool serializeToFile(const char *filename)
+		{
+			FILE *f= fopen(filename, "a");
+			if(!f) return false;
+			std::string s= serializeToString();
+			if(fwrite(s.c_str(), 1, s.length(), f)!=s.length())
+			{ fclose(f); return false; }
+			fclose(f);
+			return true;
+		}
+
+		bool deserializeFromString(std::string src)
+		{
+			char line[1024];
+			int i= 1;
+			for(std::stringstream stream(src); !stream.eof(); i++)
+			{
+				stream.getline(line, sizeof(line));
+				char *name= line, *itemName, *itemValue, *s;
+				s= name; while(*s && !isspace(*s) && *s!='.') s++;
+				if(!*s) continue;	// empty line
+				*s++= 0; while(*s && isspace(*s)) s++;
+				if(!*s) { printf("parse error at line %d\n", i); return false; }
+				itemName= s;
+				while(*s && !isspace(*s) && *s!='=') s++;
+				if(!*s) { printf("parse error at line %d\n", i); return false; }
+				*s++= 0; while(*s && isspace(*s)) s++;
+				if(!*s) { printf("parse error at line %d\n", i); return false; }
+				itemValue= s;
+				if(name==this->name)
+					for(vector<configOption>::iterator i= configOptions.begin(); i!=configOptions.end(); i++)
+						if(i->name==itemName)
+							i->putString(itemValue);
+			}
+			return true;
+		}
+
+		bool deserializeFromFile(const char *filename)
+		{
+			ifstream f;
+			f.open(filename, ios_base::in);
+			if(f.fail()) return false;
+			stringbuf sbuf;
+			f.get(sbuf, 0);
+			string str;
+			deserializeFromString(sbuf.str());
+			return true;
+		}
+};
+
+class fluxOscWindow: public fluxWindowBase, public configOptionSerializer
 {
 	public:
 		fluxOscWindow(int x, int y, int w, int h, int parent= NOPARENT, int alignment= ALIGN_LEFT|ALIGN_TOP):
 			fluxWindowBase(x,y, w,h, CB_MOUSE_FLAG|CB_PAINT_FLAG, parent, alignment),
+			configOptionSerializer("OscWindow"),
 			sampleBufferFillIndex(0), triggerLevel(0.2), triggerEnabled(true), triggerPositive(true),
 			verticalScaling(1.0), samplingRate(48000), draggingHorizScale(false), configPane(false)
 		{
 			setDisplayTime(0.01);
+
+			ADD_CONFIG_OPTION(displayTime);
+			ADD_CONFIG_OPTION(triggerLevel);
+			ADD_CONFIG_OPTION(triggerPositive);
+			ADD_CONFIG_OPTION(triggerEnabled);
+			ADD_CONFIG_OPTION(verticalScaling);
 		}
 
 		~fluxOscWindow()
@@ -337,6 +475,9 @@ class fluxOscWindow: public fluxWindowBase
 		void setDisplayTime(double time)
 		{ setDisplaySamples(int(time*samplingRate)); }
 
+		double getDisplayTime()
+		{ return displayTime; }
+
 		void setDisplaySamples(int nFrames)
 		{
 			if(nFrames<10) nFrames= 10;
@@ -370,7 +511,14 @@ class fluxOscWindow: public fluxWindowBase
 		void setSamplingRate(float s)
 		{ samplingRate= s; }
 
+		bool isTriggerEnabled()
+		{ return triggerEnabled; }
 
+		bool isTriggerPositive()
+		{ return triggerPositive; }
+
+		float getTriggerLevel()
+		{ return triggerLevel; }
 
 	private:
 		vector<jack_default_audio_sample_t> sampleBuffer;
@@ -778,7 +926,7 @@ class fluxChoiceLabel: public fluxChangableLabelBase
 		void addChoice(const char *choiceText)
 		{
 			choiceList.push_back(string(choiceText));
-			if(choiceList.size()==1) selectChoice(0);
+			if(choiceList.size()==1) selectChoice(0, false);
 		}
 
 		int getChoiceIndex()
@@ -789,7 +937,7 @@ class fluxChoiceLabel: public fluxChangableLabelBase
 
 	protected:
 		vector<string> choiceList;
-		int choiceIndex;
+		uint32_t choiceIndex;
 
 	private:
 		void cbMouse(primitive *self, int type, int x, int y, int btn)
@@ -834,47 +982,43 @@ class fluxOscWindowConfigPane: public fluxWindowBase, public changeListener
 			triggerTypeChoiceLabel->addChoice("Off");
 			triggerTypeChoiceLabel->addChoice("Rising Edge");
 			triggerTypeChoiceLabel->addChoice("Falling Edge");
-			triggerTypeChoiceLabel->selectChoice(0);
+			triggerTypeChoiceLabel->selectChoice(!oscWindow.isTriggerEnabled()? 0: oscWindow.isTriggerPositive()? 1: 2);
+			printf("triggerEnabled: %d isTriggerPositive: %d\n",
+					oscWindow.isTriggerEnabled(), oscWindow.isTriggerPositive());
 
 			triggerLevelText= create_text(fluxHandle, 8,24, 100,20, "Trigger Level: ", textColor, FONT_DEFAULT);
 			triggerLevelLabel= new fluxDraggableLabel(this, 8+textWidth,24, fluxHandle);
 			triggerLevelLabel->setMinimumValue(-50);
 			triggerLevelLabel->setMaximumValue(+50);
-			triggerLevelLabel->setValue(0.2);
 			triggerLevelLabel->setRelativeModeSpeed(0.001);
 			triggerLevelLabel->enableVerticalMode(true);
+			triggerLevelLabel->setValue(oscWindow.getTriggerLevel());
 
 			textWidth= 80;
 			displayTimeText= create_text(fluxHandle, 190,8, 100,20, "Display Time: ", textColor, FONT_DEFAULT);
 			displayTimeLabel= new fluxDraggableLabel(this, 190+textWidth,8, fluxHandle);
 			displayTimeLabel->setMinimumValue(0.0005);
 			displayTimeLabel->setMaximumValue(10);
-			displayTimeLabel->setValue(0.01);
 			displayTimeLabel->setRelativeModeSpeed(0.001);
 			displayTimeLabel->setDisplayMode(fluxDraggableLabel::DM_SECONDS);
+			displayTimeLabel->setValue(oscWindow.getDisplayTime());
 
 			verticalScalingText= create_text(fluxHandle, 190,24, 100,20, "Vert. Scaling: ", textColor, FONT_DEFAULT);
 			verticalScalingLabel= new fluxDraggableLabel(this, 190+textWidth,24, fluxHandle);
 			verticalScalingLabel->setMinimumValue(0.1);
 			verticalScalingLabel->setMaximumValue(100.0);
 			verticalScalingLabel->setRelativeModeSpeed(0.005);
-			verticalScalingLabel->setValue(1.0);
 			verticalScalingLabel->enableVerticalMode(true);
 			verticalScalingLabel->setDisplayMode(fluxDraggableLabel::DM_PERCENTAGE, 0);
+			verticalScalingLabel->setValue(oscWindow.getVerticalScaling());
 		}
 
 		void updateTriggerLevelDisplay(float newTriggerLevel)
-		{
-			triggerLevelLabel->setValue(newTriggerLevel, false);
-		}
+		{ triggerLevelLabel->setValue(newTriggerLevel, false); }
 		void updateVerticalScalingDisplay(float newVertScale)
-		{
-			verticalScalingLabel->setValue(newVertScale, false);
-		}
+		{ verticalScalingLabel->setValue(newVertScale, false); }
 		void updateDisplayTimeDisplay(float newDisplayTime)
-		{
-			displayTimeLabel->setValue(newDisplayTime, false);
-		}
+		{ displayTimeLabel->setValue(newDisplayTime, false); }
 
 		void valueChanged(changeNotifier *which)
 		{
@@ -918,18 +1062,59 @@ void fluxOscWindow::updateGuiParam(void *paramAddress)
 }
 
 
+const char *getHomeDir()
+{
+	return getenv("HOME");
+}
+
+string getConfigDir()
+{
+	return string(getHomeDir()) + "/.fluxscope";
+}
+
+string getConfigFilename()
+{
+	return getConfigDir() + "/prefs";
+}
+
+bool createConfigDir()
+{
+	string cfgdir= getConfigDir();
+	struct stat st;
+	mkdir(cfgdir.c_str(), 0700);
+	int err= stat(cfgdir.c_str(), &st);
+	if(err==0 && st.st_mode&S_IFDIR)
+		return true;
+	else
+		return false;
+}
+
+bool createConfigFile()
+{
+	if(!createConfigDir()) return false;
+	FILE *f= fopen(getConfigFilename().c_str(), "w");
+	if(!f) return false;
+	fclose(f);
+	return true;
+}
+
 int main(int argc, char* argv[])
 {
 	bool doQuit= false;
 	double time, lastTime= getTime(), lastJackTry;
 	JackInterface JackIF;
 	setVideoMode(640, 400);
+
 	fluxOscWindow oscWindow(0,0, 0,64, NOPARENT, ALIGN_LEFT|ALIGN_RIGHT|ALIGN_TOP|ALIGN_BOTTOM);
+	if(!oscWindow.deserializeFromFile(getConfigFilename().c_str()))
+		printf("couldn't read config file %s\n", getConfigFilename().c_str());
 	fluxOscWindowConfigPane configPane(oscWindow, 0,0, 0,64, NOPARENT, ALIGN_BOTTOM|ALIGN_LEFT|ALIGN_RIGHT);
+	oscWindow.setConfigPane(&configPane);
+
 	JackIF.initialize();
 	lastJackTry= getTime();
 	oscWindow.setSamplingRate(JackIF.getSamplingRate());
-	oscWindow.setConfigPane(&configPane);
+
 	while(!doQuit)
 	{
 		time= getTime();
@@ -981,7 +1166,6 @@ int main(int argc, char* argv[])
 		}
 
 		flux_tick();
-//		SDL_GL_SwapBuffers();
 		glFinish();
 
 		double frametime= getTime() - time;
@@ -989,6 +1173,10 @@ int main(int argc, char* argv[])
 		if(delay<0.001) delay= 0.001;
 		usleep(useconds_t(delay*1000000));
 	}
+
+	createConfigFile();
+	if(!oscWindow.serializeToFile(getConfigFilename().c_str()))
+		printf("couldn't write to config file %s\n", getConfigFilename().c_str());
 
 	flux_shutdown();
 	SDL_Quit();
