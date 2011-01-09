@@ -1,5 +1,5 @@
 # depslib dependency file v1.0
-1294427270 source:/home/johannes/code/fluxscope/src/main.cpp
+1294595596 source:/home/johannes/code/fluxscope/src/main.cpp
 	<sys/time.h>
 	<sys/stat.h>
 	<unistd.h>
@@ -8,6 +8,7 @@
 	<cstdio>
 	<vector>
 	<string>
+	<algorithm>
 	<sstream>
 	<iostream>
 	<fstream>

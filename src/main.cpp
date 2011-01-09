@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <vector>
 #include <string>
+#include <algorithm>
 #include <sstream>
 #include <iostream>
 #include <fstream>
@@ -104,6 +105,225 @@ enum SDLUserEvent
 {
 	SDL_USER_ADDJACKBUFFER= 0,
 };
+
+
+class configHandler
+{
+	private:
+		vector<class configOptionHandler *> configOptionHandlers;
+
+	public:
+		void addConfigOptionHandler(class configOptionHandler *cs)
+		{ configOptionHandlers.push_back(cs); }
+
+		void removeConfigOptionHandler(class configOptionHandler *cs)
+		{
+			vector<class configOptionHandler*>::iterator it=
+				find(configOptionHandlers.begin(), configOptionHandlers.end(), cs);
+			if(it!=configOptionHandlers.end()) configOptionHandlers.erase(it);
+		}
+
+		bool writeToFile(const char *filename);
+		bool readFromFile(const char *filename);
+};
+
+configHandler gConfigHandler;
+
+class configOptionHandler
+{
+	private:
+		enum optionType
+		{
+			OT_FLOAT= 0,
+			OT_BOOL
+		};
+		struct configOption
+		{
+			optionType type;
+			std::string name;
+			void *address;
+
+			std::string getString()
+			{
+				std::ostringstream s;
+				switch(type)
+				{
+					case OT_FLOAT:
+						s << *(float*)address;
+						return s.str();
+					case OT_BOOL:
+						s << *(bool*)address;
+						return s.str();
+					default:
+						return std::string("unknown option type!");
+				}
+			}
+
+			void putString(const std::string &str)
+			{
+				std::istringstream s(str);
+				switch(type)
+				{
+					case OT_FLOAT:
+						s >> *(float*)address;
+						break;
+					case OT_BOOL:
+						s >> *(bool*)address;
+						break;
+					default:
+						puts("unknown option type!");
+				}
+			}
+		};
+		vector<configOption> configOptions;
+		std::string name;
+
+		void addConfigOption(const char *name, optionType type, void *address)
+		{ configOptions.push_back( (configOption) { type, std::string(name), address } ); }
+
+	protected:
+		configOptionHandler(const char *_name):
+			name(_name)
+		{ gConfigHandler.addConfigOptionHandler(this); }
+
+		virtual ~configOptionHandler()
+		{ gConfigHandler.removeConfigOptionHandler(this); }
+
+		void addConfigOption(const char *name, float *address)
+		{ addConfigOption(name, OT_FLOAT, address); }
+
+		void addConfigOption(const char *name, bool *address)
+		{ addConfigOption(name, OT_BOOL, address); }
+
+		#define ADD_CONFIG_OPTION(var) addConfigOption(#var, &var)
+
+	public:
+		const std::string &getName()
+		{ return name; }
+
+		std::string writeToString()
+		{
+			std::string ret;
+			for(vector<configOption>::iterator i= configOptions.begin(); i!=configOptions.end(); i++)
+				ret.append(name + "." + i->name + "=" + i->getString() + "\n");
+			return ret;
+		}
+
+		bool writeToFile(const char *filename)
+		{
+			FILE *f= fopen(filename, "a");
+			if(!f) return false;
+			std::string s= writeToString();
+			if(fwrite(s.c_str(), 1, s.length(), f)!=s.length())
+			{ fclose(f); return false; }
+			fclose(f);
+			return true;
+		}
+
+		bool readItem(const char *itemName, const char *itemValue)
+		{
+			for(vector<configOption>::iterator i= configOptions.begin(); i!=configOptions.end(); i++)
+			{
+				if(i->name==itemName)
+				{
+					i->putString(itemValue);
+					return true;
+				}
+			}
+			return false;
+		}
+
+		static bool parseLine(char *line, char *&name, char *&itemName, char *&itemValue)
+		{
+			name= line;
+			while(isspace(*name)) name++;
+			char *s= name; while(*s && !isspace(*s) && *s!='.') s++;
+			if(!*s) { *name= 0; itemName= itemValue= name; return true; }	// empty line
+			*s++= 0; while(*s && isspace(*s)) s++;
+			if(!*s) return false;
+			itemName= s;
+			while(*s && !isspace(*s) && *s!='=') s++;
+			if(!*s) return false;
+			*s++= 0; while(*s && isspace(*s)) s++;
+			if(!*s) return false;
+			itemValue= s;
+			return true;
+		}
+
+		bool readFromString(std::string src)
+		{
+			char line[1024];
+			int i= 1;
+			for(std::stringstream stream(src); !stream.eof(); i++)
+			{
+				stream.getline(line, sizeof(line));
+				char *name, *itemName, *itemValue;
+				if(!parseLine(line, name, itemName, itemValue))
+					printf("parse error at line %d\n", i);
+				else if(name==this->name)
+					readItem(itemName, itemValue);
+			}
+			return true;
+		}
+
+		bool readFromFile(const char *filename)
+		{
+			ifstream f;
+			f.open(filename, ios_base::in);
+			if(f.fail()) return false;
+			stringbuf sbuf;
+			f.get(sbuf, 0);
+			string str;
+			readFromString(sbuf.str());
+			return true;
+		}
+};
+
+
+bool configHandler::writeToFile(const char *filename)
+{
+	bool ok= true;
+	for(vector<configOptionHandler*>::iterator it= configOptionHandlers.begin(); it!=configOptionHandlers.end(); it++)
+		if(!(*it)->writeToFile(filename)) ok= false;
+	return ok;
+}
+
+bool configHandler::readFromFile(const char *filename)
+{
+	char *name, *itemName, *itemValue;
+	std::string lastName;
+	configOptionHandler *handler;
+	char line[1024];
+
+	ifstream f;
+	f.open(filename, ios_base::in);
+	if(f.fail()) return false;
+	while(!f.eof())
+	{
+		f.getline(line, 1023);
+		if(f.fail()) return false;
+		if(configOptionHandler::parseLine(line, name, itemName, itemValue))
+		{
+			if(lastName!=name)
+			{
+				handler= 0;
+				for(int i= 0; i<configOptionHandlers.size(); i++)
+				{
+					if(configOptionHandlers[i]->getName()==name)
+					{
+						handler= configOptionHandlers[i];
+						lastName= name;
+						break;
+					}
+				}
+				if(!handler) continue;
+			}
+			handler->readItem(itemName, itemValue);
+		}
+	}
+	return true;
+}
+
 
 class JackInterface
 {
@@ -275,138 +495,12 @@ class fluxWindowBase
 		virtual void cbMouse(primitive *self, int type, int x, int y, int btn) { }
 };
 
-class configOptionSerializer
-{
-	private:
-		enum optionType
-		{
-			OT_FLOAT= 0,
-			OT_BOOL
-		};
-		struct configOption
-		{
-			optionType type;
-			std::string name;
-			void *address;
-
-			std::string getString()
-			{
-				std::ostringstream s;
-				switch(type)
-				{
-					case OT_FLOAT:
-						s << *(float*)address;
-						return s.str();
-					case OT_BOOL:
-						s << *(bool*)address;
-						return s.str();
-					default:
-						return std::string("unknown option type!");
-				}
-			}
-
-			void putString(const std::string &str)
-			{
-				std::istringstream s(str);
-				switch(type)
-				{
-					case OT_FLOAT:
-						s >> *(float*)address;
-						printf("%s -> %f\n", name.c_str(), *(float*)address);
-						break;
-					case OT_BOOL:
-						s >> *(bool*)address;
-						printf("%s -> %s\n", name.c_str(), *(bool*)address? "true": "false");
-						break;
-					default:
-						puts("unknown option type!");
-				}
-			}
-		};
-		vector<configOption> configOptions;
-		std::string name;
-
-		void addConfigOption(const char *name, optionType type, void *address)
-		{ configOptions.push_back( (configOption) { type, std::string(name), address } ); }
-
-	protected:
-		configOptionSerializer(const char *_name):
-			name(_name)
-		{ }
-
-		void addConfigOption(const char *name, float *address)
-		{ addConfigOption(name, OT_FLOAT, address); }
-
-		void addConfigOption(const char *name, bool *address)
-		{ addConfigOption(name, OT_BOOL, address); }
-
-		#define ADD_CONFIG_OPTION(var) addConfigOption(#var, &var)
-
-	public:
-		std::string serializeToString()
-		{
-			std::string ret;
-			for(vector<configOption>::iterator i= configOptions.begin(); i!=configOptions.end(); i++)
-				ret.append(name + "." + i->name + "=" + i->getString() + "\n");
-			return ret;
-		}
-
-		bool serializeToFile(const char *filename)
-		{
-			FILE *f= fopen(filename, "a");
-			if(!f) return false;
-			std::string s= serializeToString();
-			if(fwrite(s.c_str(), 1, s.length(), f)!=s.length())
-			{ fclose(f); return false; }
-			fclose(f);
-			return true;
-		}
-
-		bool deserializeFromString(std::string src)
-		{
-			char line[1024];
-			int i= 1;
-			for(std::stringstream stream(src); !stream.eof(); i++)
-			{
-				stream.getline(line, sizeof(line));
-				char *name= line, *itemName, *itemValue, *s;
-				s= name; while(*s && !isspace(*s) && *s!='.') s++;
-				if(!*s) continue;	// empty line
-				*s++= 0; while(*s && isspace(*s)) s++;
-				if(!*s) { printf("parse error at line %d\n", i); return false; }
-				itemName= s;
-				while(*s && !isspace(*s) && *s!='=') s++;
-				if(!*s) { printf("parse error at line %d\n", i); return false; }
-				*s++= 0; while(*s && isspace(*s)) s++;
-				if(!*s) { printf("parse error at line %d\n", i); return false; }
-				itemValue= s;
-				if(name==this->name)
-					for(vector<configOption>::iterator i= configOptions.begin(); i!=configOptions.end(); i++)
-						if(i->name==itemName)
-							i->putString(itemValue);
-			}
-			return true;
-		}
-
-		bool deserializeFromFile(const char *filename)
-		{
-			ifstream f;
-			f.open(filename, ios_base::in);
-			if(f.fail()) return false;
-			stringbuf sbuf;
-			f.get(sbuf, 0);
-			string str;
-			deserializeFromString(sbuf.str());
-			return true;
-		}
-};
-
-class fluxOscWindow: public fluxWindowBase, public configOptionSerializer
+class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 {
 	public:
 		fluxOscWindow(int x, int y, int w, int h, int parent= NOPARENT, int alignment= ALIGN_LEFT|ALIGN_TOP):
 			fluxWindowBase(x,y, w,h, CB_MOUSE_FLAG|CB_PAINT_FLAG, parent, alignment),
-			configOptionSerializer("OscWindow"),
+			configOptionHandler("OscWindow"),
 			sampleBufferFillIndex(0), triggerLevel(0.2), triggerEnabled(true), triggerPositive(true),
 			verticalScaling(1.0), samplingRate(48000), draggingHorizScale(false), configPane(false)
 		{
@@ -983,8 +1077,6 @@ class fluxOscWindowConfigPane: public fluxWindowBase, public changeListener
 			triggerTypeChoiceLabel->addChoice("Rising Edge");
 			triggerTypeChoiceLabel->addChoice("Falling Edge");
 			triggerTypeChoiceLabel->selectChoice(!oscWindow.isTriggerEnabled()? 0: oscWindow.isTriggerPositive()? 1: 2);
-			printf("triggerEnabled: %d isTriggerPositive: %d\n",
-					oscWindow.isTriggerEnabled(), oscWindow.isTriggerPositive());
 
 			triggerLevelText= create_text(fluxHandle, 8,24, 100,20, "Trigger Level: ", textColor, FONT_DEFAULT);
 			triggerLevelLabel= new fluxDraggableLabel(this, 8+textWidth,24, fluxHandle);
@@ -1106,11 +1198,10 @@ int main(int argc, char* argv[])
 	setVideoMode(640, 400);
 
 	fluxOscWindow oscWindow(0,0, 0,64, NOPARENT, ALIGN_LEFT|ALIGN_RIGHT|ALIGN_TOP|ALIGN_BOTTOM);
-	if(!oscWindow.deserializeFromFile(getConfigFilename().c_str()))
+	if(!gConfigHandler.readFromFile(getConfigFilename().c_str()))
 		printf("couldn't read config file %s\n", getConfigFilename().c_str());
 	fluxOscWindowConfigPane configPane(oscWindow, 0,0, 0,64, NOPARENT, ALIGN_BOTTOM|ALIGN_LEFT|ALIGN_RIGHT);
 	oscWindow.setConfigPane(&configPane);
-
 	JackIF.initialize();
 	lastJackTry= getTime();
 	oscWindow.setSamplingRate(JackIF.getSamplingRate());
@@ -1175,7 +1266,7 @@ int main(int argc, char* argv[])
 	}
 
 	createConfigFile();
-	if(!oscWindow.serializeToFile(getConfigFilename().c_str()))
+	if(!gConfigHandler.writeToFile(getConfigFilename().c_str()))
 		printf("couldn't write to config file %s\n", getConfigFilename().c_str());
 
 	flux_shutdown();
