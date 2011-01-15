@@ -324,23 +324,44 @@ bool configHandler::readFromFile(const char *filename)
 	return true;
 }
 
+struct JackBufferData
+{
+	jack_default_audio_sample_t **data;
+	int nFrames;
+	int nChannels;
+
+	JackBufferData(int nChannels, int nFrames)
+	{
+		data= new jack_default_audio_sample_t* [nChannels];
+		for(int i= 0; i<nChannels; i++)
+			data[i]= new jack_default_audio_sample_t[nFrames];
+		this->nChannels= nChannels;
+		this->nFrames= nFrames;
+	}
+	~JackBufferData()
+	{
+		for(int i= 0; i<nChannels; i++)
+			delete[] data[i];
+		delete[] data;
+	}
+};
 
 class JackInterface
 {
 	public:
-		JackInterface()
+		JackInterface(): client(0), running(false), eventData(0)
 		{
-			running= false;
 		}
 
 		~JackInterface()
 		{
-			jack_client_close(client);
+			if(running) jack_client_close(client);
+			if(eventData) delete(eventData);
 		}
 
-		bool initialize()
+		bool initialize(int nChannels)
 		{
-			const char *client_name = "fluxosc";
+			const char *client_name = "fluxscope";
 			const char *server_name = NULL;
 			jack_options_t options = JackNoStartServer;
 			jack_status_t status;
@@ -371,21 +392,31 @@ class JackInterface
 			   it ever shuts down, either entirely, or if it
 			   just decides to stop calling us.
 			*/
-			jack_on_shutdown (client, jackShutdownCB, this);
+			jack_on_info_shutdown (client, jackInfoShutdownCB, this);
 
 			/* display the current sample rate.
 			 */
 			printf("engine sample rate: %d\n", jack_get_sample_rate(client));
 
 			/* create ports */
-			inputPort = jack_port_register (client, "input",
-							 JACK_DEFAULT_AUDIO_TYPE,
-							 JackPortIsInput, 0);
-
-			if ((inputPort == NULL)) {
-				fprintf(stderr, "no more JACK ports available\n");
-				return false;
+			inputPorts.reserve(nChannels);
+			for(int i= 0; i<nChannels; i++)
+			{
+				char portName[64];
+				snprintf(portName, 64, "input%02d", i);
+				jack_port_t *inputPort= jack_port_register (client, portName,
+															JACK_DEFAULT_AUDIO_TYPE,
+															JackPortIsInput, 0);
+				if ((inputPort == NULL)) {
+					fprintf(stderr, "no more JACK ports available\n");
+					return false;
+				}
+				inputPorts.push_back(inputPort);
 			}
+
+			// allocate event data structure
+			if(eventData) delete(eventData), eventData= 0;
+			eventData= new JackBufferData(nChannels, jack_get_buffer_size(client));
 
 			/* Tell the JACK server that we are ready to roll.  Our
 			 * process() callback will start running now. */
@@ -411,23 +442,24 @@ class JackInterface
 		}
 
 	private:
-		jack_port_t *inputPort;
+		vector<jack_port_t *> inputPorts;
 		jack_client_t *client;
+		JackBufferData *eventData;
 		bool running;
-
 
 		int process(jack_nframes_t nframes)
 		{
-			jack_default_audio_sample_t *in= (jack_default_audio_sample_t *)jack_port_get_buffer(inputPort, nframes),
-										*inCopy= (jack_default_audio_sample_t*)malloc(nframes*sizeof(jack_default_audio_sample_t));
-
-			memcpy(inCopy, in, nframes*sizeof(jack_default_audio_sample_t));
+			for(int i= 0; i<inputPorts.size(); i++)
+			{
+				memcpy(eventData->data[i],
+					   jack_port_get_buffer(inputPorts[i], nframes),
+					   nframes*sizeof(jack_default_audio_sample_t));
+			}
 
 			SDL_UserEvent event;
 			event.type= SDL_USEREVENT;
 			event.code= SDL_USER_ADDJACKBUFFER;
-			event.data1= (void*)inCopy;
-			event.data2= (void*)nframes;
+			event.data1= (void*)eventData;
 			SDL_PushEvent((SDL_Event*)&event);
 
 			return 0;
@@ -438,15 +470,15 @@ class JackInterface
 			return reinterpret_cast<JackInterface*>(arg)->process(nframes);
 		}
 
-		void jackShutdown()
+		void jackInfoShutdown(jack_status_t code, const char *reason)
 		{
-			puts("JACK shutdown");
+			printf("JACK shutdown: %s\n", reason);
 			running= false;
 		}
 
-		static void jackShutdownCB(void *arg)
+		static void jackInfoShutdownCB(jack_status_t code, const char *reason, void *arg)
 		{
-			reinterpret_cast<JackInterface*>(arg)->jackShutdown();
+			reinterpret_cast<JackInterface*>(arg)->jackInfoShutdown(code, reason);
 		}
 };
 
@@ -522,9 +554,9 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			configPane= myConfigPane;
 		}
 
-		void addBuffer(jack_default_audio_sample_t *data, uint32_t nFrames)
+		void addBuffer(jack_default_audio_sample_t *data, uint32_t nFrames, int channelNr)
 		{
-			bool needRepaint= false;
+			bool needRepaint= (nFrames<sampleBuffer.size()? true: false);
 			if(!triggerEnabled)
 			{
 				if(sampleBufferFillIndex>=sampleBuffer.size()) sampleBufferFillIndex= 0;
@@ -818,14 +850,17 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 		}
 };
 
-
+// receives callbacks when some kind of object has changed
 class changeListener
 {
 	public:
+		// this is called when some object has changed.
+		// override this in the subclass
 		virtual void valueChanged(class changeNotifier *which)
 		{ }
 };
 
+// calls back a changeListener when it has changed
 class changeNotifier
 {
 	private:
@@ -836,12 +871,15 @@ class changeNotifier
 			myChangeListener(_myChangeListener)
 		{ }
 
+		// call this to notify the changeListener that this object has changed
 		void notifyChange()
 		{
 			if(myChangeListener) myChangeListener->valueChanged(this);
 		}
 };
 
+// base class for a label that can be changed in some way.
+// it just creates the text window and underlines it when the mouse enters the window.
 class fluxChangableLabelBase: public fluxWindowBase, public changeNotifier
 {
 	protected:
@@ -1140,7 +1178,7 @@ class fluxOscWindowConfigPane: public fluxWindowBase, public changeListener
 		}
 };
 
-
+// update the GUI to reflect a parameter change of the oscillator window
 void fluxOscWindow::updateGuiParam(void *paramAddress)
 {
 	if(!configPane) return;
@@ -1202,7 +1240,7 @@ int main(int argc, char* argv[])
 		printf("couldn't read config file %s\n", getConfigFilename().c_str());
 	fluxOscWindowConfigPane configPane(oscWindow, 0,0, 0,64, NOPARENT, ALIGN_BOTTOM|ALIGN_LEFT|ALIGN_RIGHT);
 	oscWindow.setConfigPane(&configPane);
-	JackIF.initialize();
+	JackIF.initialize(1);
 	lastJackTry= getTime();
 	oscWindow.setSamplingRate(JackIF.getSamplingRate());
 
@@ -1243,9 +1281,17 @@ int main(int argc, char* argv[])
 					switch(ev.user.code)
 					{
 						case SDL_USER_ADDJACKBUFFER:
-							oscWindow.addBuffer((jack_default_audio_sample_t*)ev.user.data1, (int)ev.user.data2);
-							free(ev.user.data1);
+						{
+							const JackBufferData *eventData= (JackBufferData*)ev.user.data1;
+							for(int i= 0; i<eventData->nChannels; i++)
+							{
+								oscWindow.addBuffer(eventData->data[i], eventData->nFrames, i);
+//								free(eventData->data[i]);
+							}
+//							free(eventData->data);
+//							free(eventData);
 							break;
+						}
 					}
 			}
 		}
@@ -1253,7 +1299,7 @@ int main(int argc, char* argv[])
 		if(!JackIF.isRunning() && time-lastJackTry>5.0)
 		{
 			lastJackTry= time;
-			JackIF.initialize();
+			JackIF.initialize(1);
 		}
 
 		flux_tick();
