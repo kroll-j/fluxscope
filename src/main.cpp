@@ -43,13 +43,17 @@ inline bool checkglerror(bool fatal= false)
 }
 
 
-void setVideoMode(int w, int h)
+bool setVideoMode(int w, int h)
 {
 	SDL_Init(SDL_INIT_VIDEO);
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 0);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
 	SDL_GL_SetAttribute(SDL_GL_SWAP_CONTROL, 0);
-	SDL_SetVideoMode(w, h, 0, SDL_OPENGL|SDL_RESIZABLE);
+	if(!SDL_SetVideoMode(w, h, 0, SDL_OPENGL|SDL_RESIZABLE))
+    {
+        printf("SDL_SetVideoMode failed: %s\n", SDL_GetError());
+        return false;
+    }
 	int doubleBuf, depthSize, swapControl;
 	SDL_GL_GetAttribute(SDL_GL_DOUBLEBUFFER, &doubleBuf);
 	SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &depthSize);
@@ -64,6 +68,7 @@ void setVideoMode(int w, int h)
     glViewport(0,0, w,h);
 	glDisable(GL_DITHER);
 	flux_screenresize(w, h);
+	return true;
 }
 
 
@@ -307,7 +312,7 @@ bool configHandler::readFromFile(const char *filename)
 			if(lastName!=name)
 			{
 				handler= 0;
-				for(int i= 0; i<configOptionHandlers.size(); i++)
+				for(uint32_t i= 0; i<configOptionHandlers.size(); i++)
 				{
 					if(configOptionHandlers[i]->getName()==name)
 					{
@@ -324,6 +329,7 @@ bool configHandler::readFromFile(const char *filename)
 	return true;
 }
 
+// event data structure which is passed from the jack realtime thread to the main thread
 struct JackBufferData
 {
 	jack_default_audio_sample_t **data;
@@ -346,10 +352,11 @@ struct JackBufferData
 	}
 };
 
+// interface to jack audio
 class JackInterface
 {
 	public:
-		JackInterface(): client(0), running(false), eventData(0)
+		JackInterface(): client(0), eventData(0), running(false)
 		{
 		}
 
@@ -449,7 +456,7 @@ class JackInterface
 
 		int process(jack_nframes_t nframes)
 		{
-			for(int i= 0; i<inputPorts.size(); i++)
+			for(uint32_t i= 0; i<inputPorts.size(); i++)
 			{
 				memcpy(eventData->data[i],
 					   jack_port_get_buffer(inputPorts[i], nframes),
@@ -533,7 +540,7 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 		fluxOscWindow(int x, int y, int w, int h, int parent= NOPARENT, int alignment= ALIGN_LEFT|ALIGN_TOP):
 			fluxWindowBase(x,y, w,h, CB_MOUSE_FLAG|CB_PAINT_FLAG, parent, alignment),
 			configOptionHandler("OscWindow"),
-			sampleBufferFillIndex(0), triggerLevel(0.2), triggerEnabled(true), triggerPositive(true),
+			nChannels(2), sampleBufferFillIndex(0), triggerLevel(0.2), triggerEnabled(true), triggerPositive(true),
 			verticalScaling(1.0), samplingRate(48000), draggingHorizScale(false), configPane(false)
 		{
 			setDisplayTime(0.01);
@@ -554,6 +561,7 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			configPane= myConfigPane;
 		}
 
+/*
 		void addBuffer(jack_default_audio_sample_t *data, uint32_t nFrames, int channelNr)
 		{
 			bool needRepaint= (nFrames<sampleBuffer.size()? true: false);
@@ -597,6 +605,7 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			if(needRepaint)
 				doRepaint();
 		}
+*/
 
 		void setDisplayTime(double time)
 		{ setDisplaySamples(int(time*samplingRate)); }
@@ -608,8 +617,10 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 		{
 			if(nFrames<10) nFrames= 10;
 			else if(nFrames>samplingRate*10) nFrames= samplingRate*10;
-			sampleBuffer.resize(nFrames);
-			displayTime= double(sampleBuffer.size())/samplingRate;
+			sampleBuffers.resize(nChannels);
+			for(int i= 0; i<nChannels; i++)
+				sampleBuffers[i].resize(nFrames);
+			displayTime= double(nFrames)/samplingRate;
 			doRepaint();
 		}
 
@@ -646,8 +657,47 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 		float getTriggerLevel()
 		{ return triggerLevel; }
 
+		void addBuffers(jack_default_audio_sample_t **data, uint32_t nFrames, uint32_t nChannels)
+		{
+            int srcPos= 0;
+			if(triggerEnabled)
+			{
+				while(nFrames)
+				{
+					int blockSize= min( nFrames, sampleBuffers[0].size()-sampleBufferFillIndex);
+					int triggerPos= (sampleBufferFillIndex<sampleBuffers[0].size()? -1:
+                                     findTriggerPos(data[0]+srcPos, nFrames-srcPos));
+					if(triggerPos>=0) blockSize= min(blockSize, triggerPos);
+					for(int i= 0; i<blockSize; i++, sampleBufferFillIndex++)
+						for(unsigned ch= 0; ch<nChannels; ch++)
+							sampleBuffers[ch][sampleBufferFillIndex]= data[ch][srcPos+i];
+					if(blockSize+srcPos<=triggerPos)
+						sampleBufferFillIndex= 0,
+						nFrames-= triggerPos;
+					else
+						nFrames-= (blockSize? blockSize: nFrames);
+				}
+			}
+			else    // trigger disabled
+            {
+				while(nFrames)
+				{
+					int blockSize= min(nFrames, sampleBuffers[0].size()-sampleBufferFillIndex);
+					for(int i= 0; i<blockSize; i++, sampleBufferFillIndex++)
+						for(unsigned ch= 0; ch<nChannels; ch++)
+							sampleBuffers[ch][sampleBufferFillIndex]= data[ch][srcPos+i];
+					if(sampleBufferFillIndex>=sampleBuffers[0].size())
+                        sampleBufferFillIndex= 0;
+                    nFrames-= (blockSize? blockSize: nFrames);
+				}
+            }
+			doRepaint();
+		}
+
 	private:
-		vector<jack_default_audio_sample_t> sampleBuffer;
+		typedef vector<jack_default_audio_sample_t> SampleVector;
+		vector<SampleVector> sampleBuffers;
+		int nChannels;
 		uint32_t sampleBufferFillIndex;
 		struct gl2DCoords { float x; float y; };
 		vector<gl2DCoords> glCoords;
@@ -663,11 +713,28 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 		int cursorPos;
 		class fluxOscWindowConfigPane *configPane;
 
-		double getValueAtSamplePos(double pos)
+		int findTriggerPos(float *data, uint32_t nFrames)
 		{
-			uint32_t idx0= uint32_t(pos), idx1= (idx0<sampleBuffer.size()-1? idx0+1: sampleBuffer.size()-1);
+			if(triggerEnabled) for(uint32_t i= 0; i<nFrames; i++)
+			{
+				float sample= data[i];
+				if( (triggerPositive && (prevTriggerSample<=triggerLevel && sample>=triggerLevel)) ||
+					((!triggerPositive) && (prevTriggerSample>=triggerLevel && sample<=triggerLevel)) )
+				{
+					prevTriggerSample= sample;
+					return i;
+				}
+				prevTriggerSample= sample;
+			}
+			return -1;
+		}
+
+		double getValueAtSamplePos(int channel, double pos)
+		{
+			uint32_t idx0= uint32_t(pos),
+				     idx1= (idx0<sampleBuffers[channel].size()-1? idx0+1: sampleBuffers[channel].size()-1);
 			double a= pos-idx0;
-			return sampleBuffer[idx0] + (sampleBuffer[idx1]-sampleBuffer[idx0])*a;
+			return sampleBuffers[channel][idx0] + (sampleBuffers[channel][idx1]-sampleBuffers[channel][idx0])*a;
 		}
 
 		void updateGuiParam(void *paramAddress);
@@ -681,13 +748,13 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 				glCoords.resize(windowWidth);
 			if(!windowWidth) return;
 
-			double sampleStep= double(sampleBuffer.size())/glCoords.size();
+			double sampleStep= double(sampleBuffers[0].size())/glCoords.size();
 			int coordIdx= 0;
-			for(double sampleIdx= 0; sampleIdx<(int)sampleBuffer.size() && coordIdx<(int)windowWidth;
+			for(double sampleIdx= 0; sampleIdx<(int)sampleBuffers[0].size() && coordIdx<(int)windowWidth;
 				sampleIdx+= sampleStep, coordIdx++)
 			{
 				glCoords[coordIdx].x= coordIdx;
-				glCoords[coordIdx].y= getValueAtSamplePos(sampleIdx);
+				glCoords[coordIdx].y= getValueAtSamplePos(0, sampleIdx);
 			}
 		}
 
@@ -750,7 +817,7 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 				glEnd();
 
 				double windowPos= double(cursorPos)/windowWidth;
-				double valueAtCursor= getValueAtSamplePos(windowPos*sampleBuffer.size())*verticalScaling;
+				double valueAtCursor= getValueAtSamplePos(0, windowPos*sampleBuffers[0].size())*verticalScaling;
 				glEnable(GL_LINE_SMOOTH);
 				glBegin(GL_LINES);
 				glVertex2f(cursorPos-4, valueAtCursor-0.035);
@@ -791,8 +858,8 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			{
 				char cursorText[128];
 				double windowPos= double(cursorPos)/windowWidth;
-				double valueAtCursor= sampleBuffer[ int(windowPos*sampleBuffer.size()) ];
-				double timeIdx= windowPos*sampleBuffer.size()/samplingRate;
+				double valueAtCursor= sampleBuffers[0][ int(windowPos*sampleBuffers[0].size()) ];
+				double timeIdx= windowPos*sampleBuffers[0].size()/samplingRate;
 				snprintf(cursorText, 128, "+%.2fms Value: %7.4f", timeIdx*1000, valueAtCursor);
 				draw_text(_font_getloc(FONT_DEFAULT), cursorText, 4,absPos->btm-4-13, *absPos, 0x10f008);
 			}
@@ -1233,7 +1300,7 @@ int main(int argc, char* argv[])
 	bool doQuit= false;
 	double time, lastTime= getTime(), lastJackTry;
 	JackInterface JackIF;
-	setVideoMode(640, 400);
+	if(!setVideoMode(640, 400)) exit(1);
 
 	fluxOscWindow oscWindow(0,0, 0,64, NOPARENT, ALIGN_LEFT|ALIGN_RIGHT|ALIGN_TOP|ALIGN_BOTTOM);
 	if(!gConfigHandler.readFromFile(getConfigFilename().c_str()))
@@ -1283,13 +1350,14 @@ int main(int argc, char* argv[])
 						case SDL_USER_ADDJACKBUFFER:
 						{
 							const JackBufferData *eventData= (JackBufferData*)ev.user.data1;
-							for(int i= 0; i<eventData->nChannels; i++)
-							{
-								oscWindow.addBuffer(eventData->data[i], eventData->nFrames, i);
-//								free(eventData->data[i]);
-							}
-//							free(eventData->data);
-//							free(eventData);
+							oscWindow.addBuffers(eventData->data, eventData->nFrames, eventData->nChannels);
+//							for(int i= 0; i<eventData->nChannels; i++)
+//							{
+////								oscWindow.addBuffer(eventData->data[i], eventData->nFrames, i);
+////								free(eventData->data[i]);
+//							}
+////							free(eventData->data);
+////							free(eventData);
 							break;
 						}
 					}
