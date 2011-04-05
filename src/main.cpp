@@ -305,8 +305,8 @@ bool configHandler::readFromFile(const char *filename)
 	if(f.fail()) return false;
 	while(!f.eof())
 	{
-		f.getline(line, 1023);
-		if(f.fail()) return false;
+		f.getline(line, 1024);
+		if(f.fail() && !f.eof()) return false;
 		if(configOptionHandler::parseLine(line, name, itemName, itemValue))
 		{
 			if(lastName!=name)
@@ -323,8 +323,12 @@ bool configHandler::readFromFile(const char *filename)
 				}
 				if(!handler) continue;
 			}
-			handler->readItem(itemName, itemValue);
+			if(handler)
+                handler->readItem(itemName, itemValue);
+            else
+                printf("configOptionHandler for %s not found\n", name);
 		}
+		else printf("bad config line\n");
 	}
 	return true;
 }
@@ -541,7 +545,8 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			fluxWindowBase(x,y, w,h, CB_MOUSE_FLAG|CB_PAINT_FLAG, parent, alignment),
 			configOptionHandler("OscWindow"),
 			nChannels(2), sampleBufferFillIndex(0), triggerLevel(0.2), triggerEnabled(true), triggerPositive(true),
-			verticalScaling(1.0), samplingRate(48000), draggingHorizScale(false), configPane(false)
+			verticalScaling(1.0), samplingRate(48000), draggingHorizScale(false), cursorPos(-1), cursorChannel(0),
+			configPane(false)
 		{
 			setDisplayTime(0.01);
 
@@ -561,52 +566,6 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			configPane= myConfigPane;
 		}
 
-/*
-		void addBuffer(jack_default_audio_sample_t *data, uint32_t nFrames, int channelNr)
-		{
-			bool needRepaint= (nFrames<sampleBuffer.size()? true: false);
-			if(!triggerEnabled)
-			{
-				if(sampleBufferFillIndex>=sampleBuffer.size()) sampleBufferFillIndex= 0;
-				int srcIndex= 0;
-				while(nFrames)
-				{
-					int framesToCopy= min(nFrames, sampleBuffer.size()-sampleBufferFillIndex);
-					memcpy(&sampleBuffer[sampleBufferFillIndex], data+srcIndex, framesToCopy*sizeof(jack_default_audio_sample_t));
-					nFrames-= framesToCopy;
-					sampleBufferFillIndex+= framesToCopy;
-					srcIndex+= framesToCopy;
-					if(sampleBufferFillIndex==sampleBuffer.size())
-						sampleBufferFillIndex= 0,
-						needRepaint= true;
-				}
-			}
-			else
-			{
-				for(uint32_t i= 0; i<nFrames; i++)
-				{
-					jack_default_audio_sample_t sample= data[i];
-					if(sampleBufferFillIndex<sampleBuffer.size())
-					{
-						sampleBuffer[sampleBufferFillIndex++]= sample;
-						if(sampleBufferFillIndex==sampleBuffer.size())
-							needRepaint= true;
-					}
-					else if( (triggerPositive && (prevTriggerSample<=triggerLevel && sample>=triggerLevel)) ||
-							 ((!triggerPositive) && (prevTriggerSample>=triggerLevel && sample<=triggerLevel)) )
-					{
-						sampleBufferFillIndex= 0;
-						needRepaint= true;
-					}
-					prevTriggerSample= sample;
-				}
-			}
-
-			if(needRepaint)
-				doRepaint();
-		}
-*/
-
 		void setDisplayTime(double time)
 		{ setDisplaySamples(int(time*samplingRate)); }
 
@@ -618,10 +577,10 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			if(nFrames<10) nFrames= 10;
 			else if(nFrames>samplingRate*10) nFrames= samplingRate*10;
 			sampleBuffers.resize(nChannels);
-			for(int i= 0; i<nChannels; i++)
+			for(unsigned i= 0; i<nChannels; i++)
 				sampleBuffers[i].resize(nFrames);
 			displayTime= double(nFrames)/samplingRate;
-			doRepaint();
+			refreshGlLineCoords();
 		}
 
 		void enableTrigger(bool enabled)
@@ -639,10 +598,10 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 		void setVerticalScaling(float s)
 		{
 			verticalScaling= (s<0.1? 0.1: s>100? 100: s);
-			float triggerMinMax= 1.0/verticalScaling;
-			if(triggerLevel>triggerMinMax) triggerLevel= triggerMinMax;
-			if(triggerLevel<-triggerMinMax) triggerLevel= -triggerMinMax;
-			updateGuiParam(&triggerLevel);
+//			float triggerMinMax= 1.0/verticalScaling;
+//			if(triggerLevel>triggerMinMax) triggerLevel= triggerMinMax;
+//			if(triggerLevel<-triggerMinMax) triggerLevel= -triggerMinMax;
+//			updateGuiParam(&triggerLevel);
 		}
 
 		void setSamplingRate(float s)
@@ -659,6 +618,8 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 
 		void addBuffers(jack_default_audio_sample_t **data, uint32_t nFrames, uint32_t nChannels)
 		{
+//            if(sampleBufferFillIndex>=sampleBuffers[0].size())
+//                sampleBufferFillIndex= 0;
             int srcPos= 0;
 			if(triggerEnabled)
 			{
@@ -668,7 +629,7 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 					int triggerPos= (sampleBufferFillIndex<sampleBuffers[0].size()? -1:
                                      findTriggerPos(data[0]+srcPos, nFrames-srcPos));
 					if(triggerPos>=0) blockSize= min(blockSize, triggerPos);
-					for(int i= 0; i<blockSize; i++, sampleBufferFillIndex++)
+					for(int i= 0; i<blockSize && sampleBufferFillIndex<sampleBuffers[0].size(); i++, sampleBufferFillIndex++)
 						for(unsigned ch= 0; ch<nChannels; ch++)
 							sampleBuffers[ch][sampleBufferFillIndex]= data[ch][srcPos+i];
 					if(blockSize+srcPos<=triggerPos)
@@ -677,6 +638,7 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 					else
 						nFrames-= (blockSize? blockSize: nFrames);
 				}
+                refreshGlLineCoords();
 			}
 			else    // trigger disabled
             {
@@ -690,17 +652,17 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
                         sampleBufferFillIndex= 0;
                     nFrames-= (blockSize? blockSize: nFrames);
 				}
+                refreshGlLineCoords();
             }
-			doRepaint();
 		}
 
 	private:
 		typedef vector<jack_default_audio_sample_t> SampleVector;
 		vector<SampleVector> sampleBuffers;
-		int nChannels;
+		unsigned nChannels;
 		uint32_t sampleBufferFillIndex;
 		struct gl2DCoords { float x; float y; };
-		vector<gl2DCoords> glCoords;
+		vector< vector<gl2DCoords> > glCoords;
 		float triggerLevel;
 		bool triggerEnabled;
 		bool triggerPositive;
@@ -711,6 +673,7 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 		bool draggingHorizScale;
 		int horizScaleClickPos;
 		int cursorPos;
+		unsigned cursorChannel;
 		class fluxOscWindowConfigPane *configPane;
 
 		int findTriggerPos(float *data, uint32_t nFrames)
@@ -734,36 +697,151 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			uint32_t idx0= uint32_t(pos),
 				     idx1= (idx0<sampleBuffers[channel].size()-1? idx0+1: sampleBuffers[channel].size()-1);
 			double a= pos-idx0;
-			return sampleBuffers[channel][idx0] + (sampleBuffers[channel][idx1]-sampleBuffers[channel][idx0])*a;
+			return sampleBuffers[channel][idx0]; // + (sampleBuffers[channel][idx1]-sampleBuffers[channel][idx0])*a;
+		}
+
+		double getValueAtCursorPos()
+		{
+		    if(cursorPos<0 || cursorChannel>sampleBuffers.size())
+                return 0;
+            return glCoords[cursorChannel][cursorPos].y;
 		}
 
 		void updateGuiParam(void *paramAddress);
 
-		void doRepaint()
+		void refreshGlLineCoords()
 		{
 			rect absPos;
 			wnd_get_abspos(fluxHandle, &absPos);
 			uint32_t windowWidth= absPos.rgt - absPos.x;
-			if(glCoords.size() != windowWidth)
-				glCoords.resize(windowWidth);
+
 			if(!windowWidth) return;
 
-			double sampleStep= double(sampleBuffers[0].size())/glCoords.size();
-			int coordIdx= 0;
-			for(double sampleIdx= 0; sampleIdx<(int)sampleBuffers[0].size() && coordIdx<(int)windowWidth;
-				sampleIdx+= sampleStep, coordIdx++)
-			{
-				glCoords[coordIdx].x= coordIdx;
-				glCoords[coordIdx].y= getValueAtSamplePos(0, sampleIdx);
-			}
+			if(glCoords.size()!=nChannels)
+                glCoords.resize(nChannels);
+			for(unsigned i= 0; i<glCoords.size(); i++)
+                if(glCoords[i].size() != windowWidth)
+                    glCoords[i].resize(windowWidth);
+
+			double sampleStep= double(sampleBuffers[0].size())/glCoords[0].size();
+			for(unsigned i= 0; i<nChannels; i++)
+            {
+                int coordIdx= 0;
+                for(double sampleIdx= 0; sampleIdx<(int)sampleBuffers[i].size() && coordIdx<(int)windowWidth;
+                    sampleIdx+= sampleStep, coordIdx++)
+                {
+                    glCoords[i][coordIdx].x= coordIdx;
+                    glCoords[i][coordIdx].y= getValueAtSamplePos(i, sampleIdx);
+                }
+            }
 		}
+
+
+        void paintLineSegments(int steps= 16)
+        {
+            glDisable(GL_LINE_SMOOTH);
+
+			glBegin(GL_LINES);
+
+			// draw segments
+			for(int i= 1; i<steps; i++)
+			{
+				float y= i*2.0/steps-1;
+				if(!(i&1)) glColor4f(1,1,1,.3);
+				else glColor4f(1,1,1,.2);
+
+				glVertex2f(0, y);
+				glVertex2f(1, y);
+
+				float x= double(i)/steps;
+				glVertex2f(x, -1);
+				glVertex2f(x, +1);
+			}
+
+			// draw center line
+			glColor4f(1,1,1,.5);
+			glVertex2f(0, 0);
+			glVertex2f(1, 0);
+
+			glEnd();
+        }
+
+        void paintLineModeCursor(int windowWidth, int windowHeight, int channelIndex)
+        {
+			if(cursorPos>=0 && cursorPos<windowWidth)
+			{
+                glDisable(GL_LINE_SMOOTH);
+				double windowPos= double(cursorPos)/windowWidth;
+				double cW= 4.0/windowWidth, cH= 8.0/windowHeight;
+
+				glLineWidth(1);
+
+				glColor4f(1,.9,.2, .8);
+				glBegin(GL_LINES);
+				glVertex2f(windowPos, -1);
+				glVertex2f(windowPos, 1);
+				glEnd();
+
+				glLineWidth(2);
+
+				double valueAtCursor= getValueAtCursorPos()*verticalScaling;
+				glEnable(GL_LINE_SMOOTH);
+				glBegin(GL_LINES);
+				glVertex2f(windowPos-cW, valueAtCursor-cH);
+				glVertex2f(windowPos+cW, valueAtCursor+cH);
+				glVertex2f(windowPos+cW, valueAtCursor-cH);
+				glVertex2f(windowPos-cW, valueAtCursor+cH);
+				glEnd();
+				glDisable(GL_LINE_SMOOTH);
+
+				glLineWidth(1);
+			}
+        }
+
+        void paintSignalLines(int channel)
+        {
+            glColor4f(.1,1,.25,.75);
+            glEnable(GL_LINE_SMOOTH);
+            glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+            glLineWidth(1.0);
+            glEnable(GL_VERTEX_ARRAY);
+
+            if(triggerEnabled)
+            {
+                // draw everything when trigger is on
+                glVertexPointer(2, GL_FLOAT, 0, (void*)&glCoords[channel][0]);
+                glDrawArrays(GL_LINE_STRIP, 0, glCoords[channel].size());
+            }
+            else
+            {
+                // trigger disabled: scroll
+                int endIndex= sampleBufferFillIndex*glCoords[channel].size()/sampleBuffers[0].size();
+                while(endIndex>glCoords[channel].size()) endIndex-= glCoords[channel].size();
+                int right= glCoords[channel].size()-endIndex;
+
+                glTranslatef(right, 0, 0);
+
+                glVertexPointer(2, GL_FLOAT, 0, (void*)&glCoords[channel][0]);
+                glDrawArrays(GL_LINE_STRIP, 0, endIndex);
+
+                glTranslatef(-right-endIndex, 0, 0);
+
+                glVertexPointer(2, GL_FLOAT, 0, (void*)&glCoords[channel][endIndex]);
+                glDrawArrays(GL_LINE_STRIP, 0, right);
+            }
+
+            glDisable(GL_VERTEX_ARRAY);
+            glLineWidth(1);
+        }
+
 
 		void cbPaint(primitive *self, rect *absPos, const rectlist *dirtyRects)
 		{
-			uint32_t windowWidth= absPos->rgt - absPos->x;
+			unsigned windowWidth= absPos->rgt - absPos->x;
 			int windowHeight= absPos->btm - absPos->y;
-			if(glCoords.size() != windowWidth)
-				doRepaint();
+
+			if(glCoords.size()!=nChannels || glCoords[0].size() != windowWidth)
+				refreshGlLineCoords();
 
 			if(!windowWidth) return;
 
@@ -772,94 +850,57 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			glEnable(GL_SCISSOR_TEST);
 			glEnable(GL_BLEND);
 			glDisable(GL_LINE_SMOOTH);
-
-			glScissor(absPos->x, viewport.btm-absPos->btm, windowWidth, windowHeight);
-
-			glMatrixMode(GL_MODELVIEW);
-			glPushMatrix();
-			glTranslatef(absPos->x, absPos->y + windowHeight*.5, 0);
-			glScalef(1, -(windowHeight)*.5, 1);
-
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glMatrixMode(GL_MODELVIEW);
 
-			glBegin(GL_LINES);
+			for(unsigned channel= 0; channel<nChannels; channel++)
+            {
+                int width= windowWidth,
+                    height= windowHeight/nChannels,
+                    x= absPos->x, y= absPos->y + height*channel;
 
-			// draw segments
-			int STEPS= 16;
-			for(int i= 1; i<STEPS; i++)
-			{
-				float y= i*2.0/STEPS-1;
-				if(!(i&1)) glColor4f(1,1,1,.3);
-				else glColor4f(1,1,1,.2);
+                glPushMatrix();
 
-				glVertex2f(0, y);
-				glVertex2f(windowWidth, y);
+                glTranslatef(x, y + height*.5, 0);
+                glScalef(width, -height*.5, 1);
 
-				float x= i*windowWidth/STEPS;
-				glVertex2f(x, -1);
-				glVertex2f(x, +1);
-			}
+                glDisable(GL_LINE_SMOOTH);
+                glColor3f(.5,.5,.5);
+                glBegin(GL_LINES);
+                glVertex2f(0,1);
+                glVertex2f(1,1);
+                glEnd();
 
-			// draw center line
-			glColor4f(1,1,1,.5);
-			glVertex2f(0, 0);
-			glVertex2f(windowWidth, 0);
+                glScissor(x, viewport.btm-(y+height), width, height);
 
-			glEnd();
+                paintLineSegments();
 
-			// draw cursor
-			if(cursorPos>=0 && cursorPos<(int)windowWidth)
-			{
-				glColor4f(1,.6,.2, .5);
-				glBegin(GL_LINES);
-				glVertex2f(cursorPos, -1);
-				glVertex2f(cursorPos, 1);
-				glEnd();
+                if(channel==cursorChannel)
+                    paintLineModeCursor(width, height, channel);
 
-				double windowPos= double(cursorPos)/windowWidth;
-				double valueAtCursor= getValueAtSamplePos(0, windowPos*sampleBuffers[0].size())*verticalScaling;
-				glEnable(GL_LINE_SMOOTH);
-				glBegin(GL_LINES);
-				glVertex2f(cursorPos-4, valueAtCursor-0.035);
-				glVertex2f(cursorPos+4, valueAtCursor+0.035);
-				glVertex2f(cursorPos+4, valueAtCursor-0.035);
-				glVertex2f(cursorPos-4, valueAtCursor+0.035);
-				glEnd();
-				glDisable(GL_LINE_SMOOTH);
-			}
+                glScaled(1.0/width, verticalScaling, 1);
 
-			glPopMatrix();
-			glPushMatrix();
-			glTranslatef(absPos->x, absPos->y + (absPos->btm-absPos->y)/2+.5, 0);
-			glScalef(1, -(absPos->btm-absPos->y-1)/2*verticalScaling, 1);
+                if(channel==0 && triggerEnabled)
+                {
+                    // draw trigger
+                    glBegin(GL_LINES);
+                    glColor4f(0,1,1,.5);
+                    glVertex2f(0, triggerLevel);
+                    glVertex2f(width, triggerLevel);
+                    glEnd();
+                }
 
-			if(triggerEnabled)
-			{
-				// draw trigger
-				glBegin(GL_LINES);
-				glColor4f(0,1,1,.5);
-				glVertex2f(0, triggerLevel);
-				glVertex2f(windowWidth, triggerLevel);
-				glEnd();
-			}
+                paintSignalLines(channel);
 
-			glColor4f(.1,1,.25,.75);
-			glEnable(GL_LINE_SMOOTH);
-			glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
-			glLineWidth(1.5);
-			glVertexPointer(2, GL_FLOAT, 0, (void*)&glCoords[0]);
-			glEnable(GL_VERTEX_ARRAY);
-			glDrawArrays(GL_LINE_STRIP, 0, windowWidth);
-			glDisable(GL_VERTEX_ARRAY);
-			glPopMatrix();
-			glLineWidth(1);
+                glPopMatrix();
+            }
 
 			if(cursorPos>=0 && cursorPos<absPos->rgt-absPos->x)
 			{
 				char cursorText[128];
 				double windowPos= double(cursorPos)/windowWidth;
-				double valueAtCursor= sampleBuffers[0][ int(windowPos*sampleBuffers[0].size()) ];
-				double timeIdx= windowPos*sampleBuffers[0].size()/samplingRate;
+				double valueAtCursor= getValueAtCursorPos();
+				double timeIdx= windowPos*sampleBuffers[cursorChannel].size()/samplingRate;
 				snprintf(cursorText, 128, "+%.2fms Value: %7.4f", timeIdx*1000, valueAtCursor);
 				draw_text(_font_getloc(FONT_DEFAULT), cursorText, 4,absPos->btm-4-13, *absPos, 0x10f008);
 			}
@@ -887,13 +928,17 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 					wnd_set_mouse_capture(fluxHandle);
 				rect absPos;
 				wnd_get_abspos(fluxHandle, &absPos);
-				int windowHeight= absPos.btm-absPos.y;
-				triggerLevel= double(windowHeight/2-y)/verticalScaling/(absPos.btm-absPos.y)*2;
-				float triggerMinMax= 1.0/verticalScaling;
-				if(triggerLevel>triggerMinMax) triggerLevel= triggerMinMax;
-				if(triggerLevel<-triggerMinMax) triggerLevel= -triggerMinMax;
-				updateGuiParam(&triggerLevel);
-				cursorPos= -1;
+				int channelHeight= (absPos.btm-absPos.y)/nChannels;
+				if(y<=channelHeight)
+                {
+                    int y1= y%channelHeight;
+                    triggerLevel= double(channelHeight/2-y1)/verticalScaling/channelHeight*2;
+                    float triggerMinMax= 1.0/verticalScaling;
+                    if(triggerLevel>triggerMinMax) triggerLevel= triggerMinMax;
+                    if(triggerLevel<-triggerMinMax) triggerLevel= -triggerMinMax;
+                    updateGuiParam(&triggerLevel);
+                    cursorPos= -1;
+                }
 			}
 			else if(type==MOUSE_UP)
 			{
@@ -909,6 +954,8 @@ class fluxOscWindow: public fluxWindowBase, public configOptionHandler
 			else if(type==MOUSE_OVER)
 			{
 				cursorPos= x;
+				cursorChannel= y/(wnd_geth(fluxHandle)/nChannels);
+				if(cursorChannel>=nChannels) cursorChannel= nChannels-1;
 			}
 			else if(type==MOUSE_OUT)
 			{
@@ -1307,7 +1354,7 @@ int main(int argc, char* argv[])
 		printf("couldn't read config file %s\n", getConfigFilename().c_str());
 	fluxOscWindowConfigPane configPane(oscWindow, 0,0, 0,64, NOPARENT, ALIGN_BOTTOM|ALIGN_LEFT|ALIGN_RIGHT);
 	oscWindow.setConfigPane(&configPane);
-	JackIF.initialize(1);
+	JackIF.initialize(2);
 	lastJackTry= getTime();
 	oscWindow.setSamplingRate(JackIF.getSamplingRate());
 
@@ -1349,15 +1396,9 @@ int main(int argc, char* argv[])
 					{
 						case SDL_USER_ADDJACKBUFFER:
 						{
+							// todo: use lock-free ringbuffer from jack/ringbuffer.h
 							const JackBufferData *eventData= (JackBufferData*)ev.user.data1;
 							oscWindow.addBuffers(eventData->data, eventData->nFrames, eventData->nChannels);
-//							for(int i= 0; i<eventData->nChannels; i++)
-//							{
-////								oscWindow.addBuffer(eventData->data[i], eventData->nFrames, i);
-////								free(eventData->data[i]);
-//							}
-////							free(eventData->data);
-////							free(eventData);
 							break;
 						}
 					}
@@ -1367,7 +1408,7 @@ int main(int argc, char* argv[])
 		if(!JackIF.isRunning() && time-lastJackTry>5.0)
 		{
 			lastJackTry= time;
-			JackIF.initialize(1);
+			JackIF.initialize(2);
 		}
 
 		flux_tick();
