@@ -1,5 +1,5 @@
 # depslib dependency file v1.0
-1302006666 source:/home/johannes/code/fluxscope/src/main.cpp
+1302101417 source:/home/johannes/code/fluxscope/src/main.cpp
 	<sys/time.h>
 	<sys/stat.h>
 	<unistd.h>
@@ -12,6 +12,7 @@
 	<sstream>
 	<iostream>
 	<fstream>
+	<cmath>
 	<GL/gl.h>
 	<GL/glu.h>
 	<SDL/SDL.h>
